@@ -21,7 +21,7 @@ tz_am = pytz.timezone('America/Manaus')
 # Melhoria: User-Agent único para evitar bloqueios na API de Mapas
 geolocator = Nominatim(user_agent="SentinelaMulherAM_SistemaSeguranca_v3")
 
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "import os
+WEBHOOK_URL = os.getenv("https://webhook.site/01357d1f-0b8a-4527-884f-41579b128943", "import os
 import re
 from datetime import datetime, time
 import httpx
