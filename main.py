@@ -18,7 +18,7 @@ tz_am = pytz.timezone('America/Manaus')
 geolocator = Nominatim(user_agent="sentinela_mulher_am_v3")
 
 # Puxa a URL do Render/Ambiente para segurança no GitHub
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "COLOQUE_AQUI_PARA_TESTE_LOCAL")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://webhook.site/01357d1f-0b8a-4527-884f-41579b128943")
 
 SQLALCHEMY_DATABASE_URL = "sqlite:///./sentinela_mulher.db"
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
