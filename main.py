@@ -7,25 +7,28 @@ import pytz
 
 from fastapi import FastAPI, Query, Depends, HTTPException, status, Body
 from fastapi.responses import HTMLResponse
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from geopy.distance import geodesic
 from geopy.geocoders import Nominatim
 import uvicorn
 
-# --- CONFIGURAÇÃO ---
+# --- CONFIGURAÇÕES DE AMBIENTE E SEGURANÇA ---
 tz_am = pytz.timezone('America/Manaus')
-geolocator = Nominatim(user_agent="sentinela_mulher_am_v3")
+geolocator = Nominatim(user_agent="sentinela_mulher_am_final")
 
-# Puxa a URL do Render/Ambiente para segurança no GitHub
+# Variáveis que você configurará no painel do Render.com
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://webhook.site/01357d1f-0b8a-4527-884f-41579b128943")
+ADMIN_USER = os.getenv("ADMIN_USER", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "seguranca_am_2026")
+SECRET_KEY = os.getenv("SECRET_KEY", "chave_mestra_sentinela_99")
 
+# --- CONFIGURAÇÃO DO BANCO DE DADOS (SQLite para MVP) ---
 SQLALCHEMY_DATABASE_URL = "sqlite:///./sentinela_mulher.db"
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
-
-# --- MODELOS ---
 
 class MedidaProtetiva(Base):
     __tablename__ = "medidas_protetivas"
@@ -50,14 +53,27 @@ class HistoricoViolacao(Base):
 
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Sentinela Mulher + Botão do Pânico AM", version="3.1.0")
-
-# --- FUNÇÕES CORE ---
+# --- INICIALIZAÇÃO E SEGURANÇA ---
+app = FastAPI(title="Sentinela Mulher + Botão do Pânico AM", version="3.2.0")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 def get_db():
     db = SessionLocal()
     try: yield db
     finally: db.close()
+
+@app.post("/token", tags=["Segurança"])
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    if form_data.username == ADMIN_USER and form_data.password == ADMIN_PASSWORD:
+        return {"access_token": SECRET_KEY, "token_type": "bearer"}
+    raise HTTPException(status_code=401, detail="Credenciais inválidas")
+
+def verificar_token(token: str = Depends(oauth2_scheme)):
+    if token != SECRET_KEY:
+        raise HTTPException(status_code=401, detail="Token inválido")
+    return token
+
+# --- UTILITÁRIOS ---
 
 def obter_endereco(lat, lon):
     try:
@@ -77,10 +93,7 @@ def verificar_vigencia(data_str: str) -> bool:
     except:
         return False
 
-# --- FUNÇÃO DE ALERTA INTEGRADA ---
-
 async def disparar_webhook_emergencia(dados: dict):
-    """Envia alerta formatado para o canal de segurança."""
     async with httpx.AsyncClient(timeout=10.0) as client:
         payload = {
             "content": "⚠️ **NOTIFICAÇÃO DE SEGURANÇA - SISTEMA SENTINELA** ⚠️",
@@ -98,12 +111,10 @@ async def disparar_webhook_emergencia(dados: dict):
                 "footer": {"text": f"Manaus/AM - {datetime.now(tz_am).strftime('%d/%m/%Y %H:%M:%S')}"}
             }]
         }
-        try:
-            await client.post(WEBHOOK_URL, json=payload)
-        except Exception as e:
-            print(f"Falha ao enviar Webhook: {e}")
+        try: await client.post(WEBHOOK_URL, json=payload)
+        except: pass
 
-# --- ENDPOINTS ---
+# --- ENDPOINTS OPERACIONAIS ---
 
 @app.post("/botao-panico", tags=["Emergência"])
 async def acionar_botao_panico(
@@ -112,22 +123,20 @@ async def acionar_botao_panico(
     long: float = Body(...),
     db: Session = Depends(get_db)
 ):
+    """Ativo INDEPENDENTE da vigência da medida."""
     endereco = obter_endereco(lat, long)
-    
-    # Busca se a vítima tem cadastro para pegar o nome
     cadastro = db.query(MedidaProtetiva).filter(MedidaProtetiva.telefone_vitima.contains(telefone_vitima[-8:])).first()
     nome_vitima = cadastro.nome_vitima if cadastro else "Usuária Não Identificada"
 
-    alerta = {
+    await disparar_webhook_emergencia({
         "titulo": "🚨 BOTÃO DO PÂNICO ACIONADO 🚨",
-        "cor": 15158332, # Vermelho
+        "cor": 15158332,
         "vitima": nome_vitima,
         "contato": telefone_vitima,
         "endereco": endereco,
         "status_juridico": "ACIONAMENTO VOLUNTÁRIO",
         "lat": lat, "long": long
-    }
-    await disparar_webhook_emergencia(alerta)
+    })
     return {"status": "Emergência disparada", "local": endereco}
 
 @app.post("/monitorar", tags=["Operacional"])
@@ -135,17 +144,17 @@ async def monitorar_proximidade(
     id_caso: str = Query(...), 
     ag_lat: float = Query(...), ag_long: float = Query(...),
     vi_lat: float = Query(...), vi_long: float = Query(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    token: str = Depends(verificar_token)
 ):
     medida = db.query(MedidaProtetiva).filter(MedidaProtetiva.processo_id == id_caso.strip()).first()
-    if not medida: raise HTTPException(status_code=404, detail="Processo não encontrado.")
+    if not medida: raise HTTPException(status_code=404, detail="Processo não localizado.")
 
     vigente = verificar_vigencia(medida.data_validade)
     dist = geodesic((ag_lat, ag_long), (vi_lat, vi_long)).meters
     endereco = obter_endereco(ag_lat, ag_long)
     
     if dist <= medida.distancia_minima:
-        # Salva histórico
         log = HistoricoViolacao(
             medida_id=medida.id, distancia_detectada=round(dist, 2),
             lat_agressor=ag_lat, long_agressor=ag_long,
@@ -155,10 +164,9 @@ async def monitorar_proximidade(
         db.add(log)
         db.commit()
 
-        # Envia alerta rico
-        alerta = {
+        await disparar_webhook_emergencia({
             "titulo": "⚠️ VIOLAÇÃO DE PERÍMETRO DETECTADA",
-            "cor": 16776960, # Amarelo/Laranja
+            "cor": 16776960,
             "vitima": medida.nome_vitima,
             "contato": medida.telefone_vitima,
             "endereco": endereco,
@@ -166,17 +174,65 @@ async def monitorar_proximidade(
             "status_juridico": "VIGENTE" if vigente else "EXPIRADA (Alerta Preventivo)",
             "foto": medida.foto_agressor_url,
             "lat": ag_lat, "long": ag_long
-        }
-        await disparar_webhook_emergencia(alerta)
+        })
 
-    return {"resultado": "ALERTA" if dist <= medida.distancia_minima else "OK", "local": endereco}
+    return {"resultado": "ALERTA" if dist <= medida.distancia_minima else "OK", "local": endereco, "vigencia": vigente}
 
 @app.post("/cadastrar-medida", tags=["Administrativo"])
-async def cadastrar(processo: str = Body(...), vitima: str = Body(...), telefone: str = Body(...), validade: str = Body(...), raio: float = Body(500.0), foto: str = Body(None), db: Session = Depends(get_db)):
+async def cadastrar(
+    processo: str = Body(...), 
+    vitima: str = Body(...), 
+    telefone: str = Body(...), 
+    validade: str = Body(...), 
+    raio: float = Body(500.0), 
+    foto: str = Body(None), 
+    db: Session = Depends(get_db),
+    token: str = Depends(verificar_token)
+):
     nova = MedidaProtetiva(processo_id=processo, nome_vitima=vitima, telefone_vitima=telefone, distancia_minima=raio, foto_agressor_url=foto, data_validade=validade)
     db.add(nova)
     db.commit()
-    return {"status": "Cadastrado"}
+    return {"status": "Cadastrado com sucesso"}
+
+@app.get("/relatorio-impressao/{processo_id}", response_class=HTMLResponse, tags=["Relatórios"])
+async def gerar_relatorio_oficial(processo_id: str, db: Session = Depends(get_db)):
+    medida = db.query(MedidaProtetiva).filter(MedidaProtetiva.processo_id == processo_id.strip()).first()
+    if not medida: return "<h1>Erro: Processo não encontrado.</h1>"
+    
+    vigente = verificar_vigencia(medida.data_validade)
+    cor_status = "#28a745" if vigente else "#dc3545"
+    violacoes = db.query(HistoricoViolacao).filter(HistoricoViolacao.medida_id == medida.id).order_by(HistoricoViolacao.timestamp.desc()).all()
+    
+    linhas = ""
+    for v in violacoes:
+        v_cor = "green" if v.medida_vigente_na_hora == "SIM" else "red"
+        linhas += f"<tr><td>{v.timestamp.strftime('%d/%m/%Y %H:%M:%S')}</td><td>{v.distancia_detectada}m</td><td><b>{v.endereco_aproximado}</b></td><td style='color:{v_cor}; font-weight:bold;'>{v.medida_vigente_na_hora}</td></tr>"
+
+    return f"""
+    <html>
+    <head><meta charset="UTF-8"><style>
+        body {{ font-family: sans-serif; padding: 20px; }}
+        .header {{ text-align: center; border-bottom: 5px solid #003366; }}
+        .status {{ background: {cor_status}; color: white; padding: 10px; border-radius: 20px; display: inline-block; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
+        th, td {{ border: 1px solid #ddd; padding: 10px; font-size: 13px; }}
+        th {{ background: #003366; color: white; }}
+        @media print {{ .no-print {{ display: none; }} }}
+    </style></head>
+    <body>
+        <div class="header">
+            <h2>SISTEMA SENTINELA MULHER - AM</h2>
+            <div class="status">{'VIGENTE' if vigente else 'EXPIRADA'}</div>
+        </div>
+        <p><b>Vítima:</b> {medida.nome_vitima} | <b>Processo:</b> {medida.processo_id}</p>
+        <table>
+            <thead><tr><th>Data/Hora</th><th>Distância</th><th>Localização</th><th>Vigente?</th></tr></thead>
+            <tbody>{linhas or "<tr><td colspan='4'>Sem violações registradas.</td></tr>"}</tbody>
+        </table>
+        <div style="text-align:center; margin-top:30px;" class="no-print">
+            <button onclick="window.print()" style="padding:10px 20px; background:#003366; color:white; border:none; border-radius:5px; cursor:pointer;">IMPRIMIR RELATÓRIO PDF</button>
+        </div>
+    </body></html>"""
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
